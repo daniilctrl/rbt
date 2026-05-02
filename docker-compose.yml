@@ -1,0 +1,123 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: nrt-rabbitmq
+    ports:
+      - '5672:5672'    # AMQP
+      - '15672:15672'  # Management UI: http://localhost:15672 (guest/guest)
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - rabbit_data:/var/lib/rabbitmq
+
+  redis:
+    image: redis:7-alpine
+    container_name: nrt-redis
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: producer
+    image: nrt-producer
+    container_name: nrt-producer
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-guest}:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672
+      EVENTS_EXCHANGE: ${EVENTS_EXCHANGE:-events.exchange}
+      PRODUCER_PORT: 3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      NODE_ENV: production
+    ports:
+      - '3000:3000'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/health']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: consumer
+    image: nrt-consumer
+    container_name: nrt-consumer
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-guest}:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672
+      EVENTS_EXCHANGE: ${EVENTS_EXCHANGE:-events.exchange}
+      EVENTS_QUEUE: ${EVENTS_QUEUE:-events.q}
+      EVENTS_RETRY_QUEUE: ${EVENTS_RETRY_QUEUE:-events.retry.q}
+      EVENTS_DLQ: ${EVENTS_DLQ:-events.dlq.parking}
+      NOTIFICATIONS_EXCHANGE: ${NOTIFICATIONS_EXCHANGE:-notifications.exchange}
+      RETRY_MAX_ATTEMPTS: ${RETRY_MAX_ATTEMPTS:-3}
+      RETRY_TTL_MS: ${RETRY_TTL_MS:-2000}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      IDEMPOTENCY_TTL_SECONDS: ${IDEMPOTENCY_TTL_SECONDS:-86400}
+      TELEGRAM_DEFAULT_CHAT_ID: ${TELEGRAM_DEFAULT_CHAT_ID}
+      CONSUMER_PORT: 3001
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      NODE_ENV: production
+    ports:
+      - '3001:3001'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3001/health']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  telegram-notifier:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: telegram-notifier
+    image: nrt-telegram
+    container_name: nrt-telegram
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-guest}:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672
+      NOTIFICATIONS_EXCHANGE: ${NOTIFICATIONS_EXCHANGE:-notifications.exchange}
+      NOTIFICATIONS_TELEGRAM_QUEUE: ${NOTIFICATIONS_TELEGRAM_QUEUE:-notifications.telegram.q}
+      NOTIFICATIONS_RETRY_QUEUE: ${NOTIFICATIONS_RETRY_QUEUE:-notifications.retry.q}
+      NOTIFICATIONS_DLQ: ${NOTIFICATIONS_DLQ:-notifications.dlq.parking}
+      RETRY_MAX_ATTEMPTS: ${RETRY_MAX_ATTEMPTS:-3}
+      RETRY_TTL_MS: ${RETRY_TTL_MS:-2000}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_DEFAULT_CHAT_ID: ${TELEGRAM_DEFAULT_CHAT_ID}
+      TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-https://api.telegram.org}
+      TELEGRAM_NOTIFIER_PORT: 3002
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      NODE_ENV: production
+    ports:
+      - '3002:3002'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3002/health']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  rabbit_data:
