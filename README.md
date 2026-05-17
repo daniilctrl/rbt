@@ -85,45 +85,6 @@ docker compose up --build
 
 ---
 
-## Проверка
-
-### Через Swagger (рекомендуется)
-
-1. Открыть http://localhost:3000/api
-2. Раскрыть `POST /events` → **Try it out**
-3. Вставить тело:
-   ```json
-   {
-     "eventType": "user.registered",
-     "payload": {
-       "message": "Привет из микросервиса",
-       "parseMode": "HTML"
-     }
-   }
-   ```
-4. **Execute** → ответ 202 с `eventId` → в Telegram придёт сообщение от бота.
-
-### Через curl
-
-```bash
-curl -X POST http://localhost:3000/events \
-  -H 'Content-Type: application/json' \
-  -d '{"eventType":"user.registered","payload":{"message":"Привет","parseMode":"HTML"}}'
-```
-
-Ответ:
-```json
-{
-  "eventId": "0d9a3a46-beaf-4f08-b374-ddff1e152186",
-  "correlationId": "e084b334-58a4-47cc-92bc-22a1c63239f4",
-  "occurredAt": "2026-05-02T20:45:52.020Z"
-}
-```
-
-В логах compose видно полный путь события через все три сервиса по `eventId` / `correlationId`.
-
----
-
 ## API
 
 `POST /events` — опубликовать событие.
@@ -140,7 +101,7 @@ curl -X POST http://localhost:3000/events \
 | Поле | Обяз. | Описание |
 |---|---|---|
 | `eventType` | да | Тип события, произвольная dot-нотация |
-| `payload` | да | Произвольный JSON. Для интеграции с Telegram-сервисом можно положить `chatId`, `message`, `parseMode` (см. Swagger) |
+| `payload` | да | Произвольный JSON. Для интеграции с Telegram-сервисом можно положить `chatId`, `message`, `parseMode` |
 | `correlationId` | нет | Если не передан — Producer сгенерирует UUID v4 |
 | `routingKey` | нет | По умолчанию `event.created` |
 
@@ -164,27 +125,6 @@ pnpm test:e2e
 - Unit на каждый use-case (producer / consumer / telegram-notifier) с моками портов
 - E2E «producer → consumer → notifications.exchange» через настоящий RabbitMQ (Testcontainers)
 - E2E «notifications.exchange → telegram-notifier → Bot API» с моком Bot API через `nock`
-
----
-
-## Соответствие требованиям задания
-
-| Требование | Где реализовано |
-|---|---|
-| **Producer и Consumer для RabbitMQ** | `apps/producer`, `apps/consumer` |
-| Уникальный идентификатор события (UUID для идемпотентности) | UUID v4 генерируется в `PublishEventUseCase`, проверяется в Redis (`SET NX EX`) в `RedisIdempotencyStoreAdapter` |
-| Сериализация в JSON | Через `@golevelup/nestjs-rabbitmq` (стандартная) |
-| Подтверждение успешной отправки | Publisher confirms — `RabbitEventPublisherAdapter` ждёт ack от брокера перед резолвом |
-| Ретраи на временные ошибки соединения | `p-retry` с экспоненциальным backoff в Producer'е (3 попытки) |
-| Автоматическое/ручное подтверждение обработки | Manual ack через `@RabbitSubscribe` в Consumer'е |
-| Механизм повторной обработки при ошибке | `events.retry.q` с `x-message-ttl=2000` и dead-letter обратно в `events.exchange`. После 3 попыток — `events.dlq.parking` для ручного разбора |
-| Логирование успехов/ошибок | `nestjs-pino` со структурированными JSON-логами, `correlationId` пронизывает все три сервиса |
-| **Сервис отправки в Telegram** | `apps/telegram-notifier` — подписан на `notifications.telegram.q`, вызывает Bot API |
-| **Nest.js модульная архитектура** | Каждый сервис разбит на `domain` / `application` (use-case'ы и порты) / `infrastructure` (адаптеры) |
-| **Docker** | Multi-stage `Dockerfile` с тремя `target`, `docker-compose.yml` с healthcheck'ами |
-| **SOLID, чистая архитектура** | Use-case зависит от порта (интерфейса), не от реализации. Замена RabbitMQ на Kafka = новый адаптер без изменений в use-case'е |
-| **Swagger** *(в плюс)* | Producer на `/api`, DTO с `class-validator` + `@ApiProperty` |
-| **Тесты Jest / e2e** *(в плюс)* | Unit на use-case'ы + e2e через Testcontainers с настоящим RabbitMQ и mock'ом Bot API |
 
 ---
 
@@ -218,20 +158,3 @@ src/
     ├── telegram/             HTTP-клиент Telegram (только в notifier'е)
     └── http/                 HTTP-контроллеры (только в producer'е)
 ```
-
----
-
-## RabbitMQ топология
-
-| Объект | Тип | Назначение |
-|---|---|---|
-| `events.exchange` | topic | Точка входа от Producer'а |
-| `events.q` | queue | Основная очередь Consumer'а |
-| `events.retry.q` | queue (TTL=2с, DLX) | Отлёживание перед повторной попыткой |
-| `events.dlq.parking` | queue | Парковка после исчерпания ретраев |
-| `notifications.exchange` | topic | Выход от Consumer'а |
-| `notifications.telegram.q` | queue | Очередь Telegram-сервиса |
-| `notifications.retry.q` | queue (TTL=2с, DLX) | Retry для уведомлений |
-| `notifications.dlq.parking` | queue | Парковка не отправленных уведомлений |
-
-Topology объявляется декларативно при старте сервисов через `@golevelup/nestjs-rabbitmq` — независимо от порядка запуска.
